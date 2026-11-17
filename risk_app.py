@@ -54,7 +54,6 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
     val_curr = row.get('Annual Value USD_curr', np.nan)
     val_prev = row.get('Annual Value USD_prev', np.nan)
     val = val_curr if pd.notna(val_curr) else val_prev
-    # 金额除以 1,000,000 并四舍五入取整
     val = round(val / 1_000_000) if pd.notna(val) else 0
 
     orig_risk_prev = row.get('Risk_prev')
@@ -154,13 +153,16 @@ def generate_single_batch_total_table(df_batch):
       aggfunc='count',
       fill_value=0,
   )
-  pivot_value = df_filtered.pivot_table(
-      index='NPX Code',
-      columns='NormRisk',
-      values='ValM',
-      aggfunc='sum',
-      fill_value=0,
-  ).round()
+  pivot_value = (
+      df_filtered.pivot_table(
+          index='NPX Code',
+          columns='NormRisk',
+          values='ValM',
+          aggfunc='sum',
+          fill_value=0,
+      )
+      .round()
+  )
 
   all_rm_count = pivot_count.sum(axis=1)
   all_rm_value = pivot_value.sum(axis=1)
@@ -209,7 +211,7 @@ def generate_single_batch_total_table(df_batch):
 
 
 def generate_single_batch_risk45_table(df_batch):
-  """为单批次生成原材料 Risk 4&5 表格（金额除以100万并取整）"""
+  """为单批次生成原材料 Risk 4&5 表格（Total 放到最前面两列）"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
   df_c['ValM'] = df_c['Annual Value USD'] / 1_000_000
@@ -234,14 +236,17 @@ def generate_single_batch_risk45_table(df_batch):
     c5 = r5.loc[npx, 'C'] if npx in r5.index else 0
     v5 = round(r5.loc[npx, 'V']) if npx in r5.index else 0
 
+    tot_c = c4 + c5
+    tot_v = v4 + v5
+
     res_rows.append({
         'NPX Code': npx,
+        'Risk4_5_Total_Count': tot_c,
+        'Risk4_5_Total_Value_MUSD': tot_v,
         'Risk4_Count': c4,
         'Risk4_Value_MUSD': v4,
         'Risk5_Count': c5,
         'Risk5_Value_MUSD': v5,
-        'Risk4_5_Total_Count': c4 + c5,
-        'Risk4_5_Total_Value_MUSD': v4 + v5,
     })
 
   res_df = pd.DataFrame(res_rows)
@@ -434,7 +439,7 @@ if uploaded_files:
 
           with tab4:
             st.markdown(
-                '### 🚨 原材料 Risk 4&5 报表 (金额单位: MUSD，无小数点)'
+                '### 🚨 原材料 Risk 4&5 报表 (Risk 4&5 Total 置于前两列)'
             )
             for b_name, b_df in data_dict.items():
               st.markdown(f'#### 📌 批次: {b_name}')
