@@ -1,4 +1,5 @@
 import io
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -104,7 +105,7 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
 
 
 def aggregate_by_npx(diff_df):
-  """以 NPX Code 为维度进行矩阵汇总（含 Total 行，改用 Annual_Value_MUSD）"""
+  """以 NPX Code 为维度进行矩阵汇总（含 Total 行）"""
   if diff_df.empty:
     return pd.DataFrame()
 
@@ -138,7 +139,7 @@ def aggregate_by_npx(diff_df):
 
 
 def generate_single_batch_total_table(df_batch):
-  """为单批次生成原材料 Total 表格（金额改为 Annual_Value_MUSD）"""
+  """为单批次生成原材料 Total 表格"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
   df_c['ValM'] = df_c['Annual Value USD'] / 1_000_000
@@ -211,7 +212,7 @@ def generate_single_batch_total_table(df_batch):
 
 
 def generate_single_batch_risk45_table(df_batch):
-  """为单批次生成原材料 Risk 4&5 表格（金额改为 Annual_Value_MUSD）"""
+  """为单批次生成原材料 Risk 4&5 表格"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
   df_c['ValM'] = df_c['Annual Value USD'] / 1_000_000
@@ -261,7 +262,7 @@ def generate_single_batch_risk45_table(df_batch):
 
 
 def generate_single_batch_category_risk_table(df_batch):
-  """为单批次生成 Category 风险分布表（金额改为 Annual_Value_MUSD）"""
+  """为单批次生成 Category 风险分布表"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
   df_c['ValM'] = df_c['Annual Value USD'] / 1_000_000
@@ -336,17 +337,44 @@ def generate_single_batch_category_risk_table(df_batch):
 # --- 界面主逻辑 ---
 st.title('📊 物料风险动态比对与多维报表系统')
 st.markdown(
-    '上传多个批次数据，自动执行链式对比。所有金额指标已统一命名为 **Annual Value (MUSD)** 且不保留小数点。'
+    '系统已自动加载 GitHub 仓库 `data/` 目录下的历史批次数据。您也可以在左侧边栏继续上传最新的月份文件。'
 )
 
+# 1. 自动加载 data/ 目录下的历史文件
+data_dict = {}
+data_dir = 'data'
+if os.path.exists(data_dir):
+  for filename in os.listdir(data_dir):
+    if filename.endswith(('.xlsx', '.xls')):
+      file_path = os.path.join(data_dir, filename)
+      try:
+        df = pd.read_excel(file_path)
+        df.columns = [str(c).strip() for c in df.columns]
+        if '批次名称' in df.columns and not df['批次名称'].dropna().empty:
+          batch_key = str(df['批次名称'].dropna().iloc[0])
+        else:
+          batch_key = filename.split('.')[0]
+        data_dict[batch_key] = df
+      except Exception as e:
+        st.warning(f'自动加载历史文件 {filename} 失败: {e}')
+
 with st.sidebar:
-  st.header('1. 上传数据文件')
+  st.header('1. 数据源管理')
+  if data_dict:
+    st.success(
+        f'已自动加载历史批次: {", ".join(sorted(data_dict.keys()))}'
+    )
+  else:
+    st.info('未在 GitHub `data/` 目录检测到历史文件，请通过下方上传。')
+
+  st.markdown('---')
+  st.subheader('上传额外/最新批次文件')
   uploaded_files = st.file_uploader(
       '支持上传多个 Excel 文件 (.xlsx)', type=['xlsx', 'xls'], accept_multiple_files=True
   )
 
+# 2. 如果用户在侧边栏上传了新文件，合并或覆盖到 data_dict 中
 if uploaded_files:
-  data_dict = {}
   for file in uploaded_files:
     try:
       df = pd.read_excel(file)
@@ -357,216 +385,185 @@ if uploaded_files:
         batch_key = file.name.split('.')[0]
       data_dict[batch_key] = df
     except Exception as e:
-      st.error(f'读取文件 {file.name} 失败: {e}')
+      st.error(f'读取上传文件 {file.name} 失败: {e}')
 
-  if data_dict:
-    sorted_batches = sorted(list(data_dict.keys()))
+if data_dict:
+  sorted_batches = sorted(list(data_dict.keys()))
 
-    st.sidebar.markdown('---')
-    st.sidebar.header('2. 选择对比批次')
+  st.sidebar.markdown('---')
+  st.sidebar.header('2. 选择对比批次')
 
-    baseline_batch = st.sidebar.selectbox(
-        '选择基准批次 (Baseline)',
-        sorted_batches,
-        help='作为最起始对比的基准批次',
-    )
+  baseline_batch = st.sidebar.selectbox(
+      '选择基准批次 (Baseline)',
+      sorted_batches,
+      help='作为最起始对比的基准批次',
+  )
 
-    comparison_batches = st.sidebar.multiselect(
-        '选择对比批次 (可多选)',
-        [b for b in sorted_batches if b != baseline_batch],
-        help='按选择顺序依次与上一批次进行链式对比',
-    )
+  comparison_batches = st.sidebar.multiselect(
+      '选择对比批次 (可多选)',
+      [b for b in sorted_batches if b != baseline_batch],
+      help='按选择顺序依次与上一批次进行链式对比',
+  )
 
-    if st.sidebar.button('开始执行对比分析', type='primary'):
-      if not comparison_batches:
-        st.warning('请至少选择一个对比批次！')
+  if st.sidebar.button('开始执行对比分析', type='primary'):
+    if not comparison_batches:
+      st.warning('请至少选择一个对比批次！')
+    else:
+      all_diffs = []
+      current_baseline_name = baseline_batch
+      active_df = data_dict[baseline_batch]
+
+      selected_comparisons = sorted(comparison_batches)
+
+      progress_text = st.empty()
+      for idx, next_batch_name in enumerate(selected_comparisons):
+        progress_text.text(
+            f'正在进行第 {idx+1} 阶段对比: {current_baseline_name} ➔'
+            f' {next_batch_name} ...'
+        )
+        next_df = data_dict[next_batch_name]
+
+        diff_res = compare_two_batches(
+            active_df, next_df, current_baseline_name, next_batch_name
+        )
+        if not diff_res.empty:
+          all_diffs.append(diff_res)
+
+        active_df = next_df
+        current_baseline_name = next_batch_name
+
+      progress_text.empty()
+
+      if all_diffs:
+        cumulative_diff_df = pd.concat(all_diffs, ignore_index=True)
+        summary_df = aggregate_by_npx(cumulative_diff_df)
+
+        st.success(
+            f'分析完成！累计产生变动明细记录共 {len(cumulative_diff_df)} 条。'
+        )
+
+        # 网页端展示选项卡
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            '📋 变动明细数据',
+            '📊 NPX 变化矩阵',
+            '📦 原材料 Total (分批次)',
+            '🚨 原材料 Risk 4&5 (分批次)',
+            '🏷️ Category 风险矩阵 (分批次)',
+        ])
+
+        with tab1:
+          st.dataframe(cumulative_diff_df, use_container_width=True)
+        with tab2:
+          st.dataframe(summary_df, use_container_width=True)
+
+        with tab3:
+          st.markdown('### 📦 原材料 Total 报表 (金额单位: Annual Value MUSD)')
+          for b_name, b_df in data_dict.items():
+            st.markdown(f'#### 📌 批次: {b_name}')
+            t_df = generate_single_batch_total_table(b_df)
+            st.dataframe(t_df, use_container_width=True)
+
+        with tab4:
+          st.markdown('### 🚨 原材料 Risk 4&5 报表')
+          for b_name, b_df in data_dict.items():
+            st.markdown(f'#### 📌 批次: {b_name}')
+            r_df = generate_single_batch_risk45_table(b_df)
+            st.dataframe(r_df, use_container_width=True)
+
+        with tab5:
+          st.markdown('### 🏷️ Category 风险分布矩阵')
+          for b_name, b_df in data_dict.items():
+            st.markdown(f'#### 📌 批次: {b_name}')
+            c_df = generate_single_batch_category_risk_table(b_df)
+            st.dataframe(c_df, use_container_width=True)
+
+        # 多 Sheet & 多表格 Excel 导出
+        st.markdown('---')
+        st.subheader('📥 导出完整多维分析报表 (.xlsx)')
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+          cumulative_diff_df.to_excel(
+              writer, sheet_name='累计变动明细', index=False
+          )
+          summary_df.to_excel(
+              writer, sheet_name='NPX矩阵汇总', index=False
+          )
+
+          # 写入 原材料Total
+          writer_total_sheets = []
+          for b_name, b_df in data_dict.items():
+            t_df = generate_single_batch_total_table(b_df)
+            writer_total_sheets.append(
+                pd.DataFrame([
+                    {
+                        t_df.columns[0]: f'=== 批次: {b_name} ===',
+                        **{col: '' for col in t_df.columns[1:]},
+                    }
+                ])
+            )
+            writer_total_sheets.append(t_df)
+            writer_total_sheets.append(
+                pd.DataFrame([{col: '' for col in t_df.columns}])
+            )
+          pd.concat(writer_total_sheets, ignore_index=True).to_excel(
+              writer, sheet_name='原材料Total', index=False
+          )
+
+          # 写入 原材料Risk4&5
+          writer_risk_sheets = []
+          for b_name, b_df in data_dict.items():
+            r_df = generate_single_batch_risk45_table(b_df)
+            writer_risk_sheets.append(
+                pd.DataFrame([
+                    {
+                        r_df.columns[0]: f'=== 批次: {b_name} ===',
+                        **{col: '' for col in r_df.columns[1:]},
+                    }
+                ])
+            )
+            writer_risk_sheets.append(r_df)
+            writer_risk_sheets.append(
+                pd.DataFrame([{col: '' for col in r_df.columns}])
+            )
+          pd.concat(writer_risk_sheets, ignore_index=True).to_excel(
+              writer, sheet_name='原材料risk4&5', index=False
+          )
+
+          # 写入 Category风险分布
+          writer_cat_sheets = []
+          for b_name, b_df in data_dict.items():
+            c_df = generate_single_batch_category_risk_table(b_df)
+            writer_cat_sheets.append(
+                pd.DataFrame([
+                    {
+                        c_df.columns[0]: f'=== 批次: {b_name} ===',
+                        **{col: '' for col in c_df.columns[1:]},
+                    }
+                ])
+            )
+            writer_cat_sheets.append(c_df)
+            writer_cat_sheets.append(
+                pd.DataFrame([{col: '' for col in c_df.columns}])
+            )
+          pd.concat(writer_cat_sheets, ignore_index=True).to_excel(
+              writer, sheet_name='Category风险分布', index=False
+          )
+
+        excel_data = output.getvalue()
+
+        st.download_button(
+            label='下载分批次独立表格报表 (.xlsx)',
+            data=excel_data,
+            file_name='batch_split_risk_analysis_report.xlsx',
+            mime=(
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            ),
+        )
       else:
-        all_diffs = []
-        current_baseline_name = baseline_batch
-        active_df = data_dict[baseline_batch]
-
-        selected_comparisons = sorted(comparison_batches)
-
-        progress_text = st.empty()
-        for idx, next_batch_name in enumerate(selected_comparisons):
-          progress_text.text(
-              f'正在进行第 {idx+1} 阶段对比: {current_baseline_name} ➔'
-              f' {next_batch_name} ...'
-          )
-          next_df = data_dict[next_batch_name]
-
-          diff_res = compare_two_batches(
-              active_df, next_df, current_baseline_name, next_batch_name
-          )
-          if not diff_res.empty:
-            all_diffs.append(diff_res)
-
-          active_df = next_df
-          current_baseline_name = next_batch_name
-
-        progress_text.empty()
-
-        if all_diffs:
-          cumulative_diff_df = pd.concat(all_diffs, ignore_index=True)
-          summary_df = aggregate_by_npx(cumulative_diff_df)
-
-          st.success(
-              f'分析完成！累计产生变动明细记录共 {len(cumulative_diff_df)} 条。'
-          )
-
-          # 网页端展示选项卡
-          tab1, tab2, tab3, tab4, tab5 = st.tabs([
-              '📋 变动明细数据',
-              '📊 NPX 变化矩阵',
-              '📦 原材料 Total (分批次)',
-              '🚨 原材料 Risk 4&5 (分批次)',
-              '🏷️ Category 风险矩阵 (分批次)',
-          ])
-
-          with tab1:
-            st.dataframe(cumulative_diff_df, use_container_width=True)
-          with tab2:
-            st.dataframe(summary_df, use_container_width=True)
-
-          with tab3:
-            st.markdown(
-                '### 📦 原材料 Total 报表 (金额指标: Annual Value MUSD)'
-            )
-            for b_name, b_df in data_dict.items():
-              st.markdown(f'#### 📌 批次: {b_name}')
-              t_df = generate_single_batch_total_table(b_df)
-              st.dataframe(t_df, use_container_width=True)
-
-          with tab4:
-            st.markdown('### 🚨 原材料 Risk 4&5 报表')
-            for b_name, b_df in data_dict.items():
-              st.markdown(f'#### 📌 批次: {b_name}')
-              r_df = generate_single_batch_risk45_table(b_df)
-              st.dataframe(r_df, use_container_width=True)
-
-          with tab5:
-            st.markdown('### 🏷️ Category 风险分布矩阵')
-            for b_name, b_df in data_dict.items():
-              st.markdown(f'#### 📌 批次: {b_name}')
-              c_df = generate_single_batch_category_risk_table(b_df)
-              st.dataframe(c_df, use_container_width=True)
-
-          # 多 Sheet & 多表格 Excel 导出
-          st.markdown('---')
-          st.subheader('📥 导出完整多维分析报表 (.xlsx)')
-
-          output = io.BytesIO()
-          with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            cumulative_diff_df.to_excel(
-                writer, sheet_name='累计变动明细', index=False
-            )
-            summary_df.to_excel(
-                writer, sheet_name='NPX矩阵汇总', index=False
-            )
-
-            # 写入 原材料Total
-            writer_total_sheets = []
-            for b_name, b_df in data_dict.items():
-              t_df = generate_single_batch_total_table(b_df)
-              writer_total_sheets.append(
-                  pd.DataFrame([
-                      {
-                          t_df.columns[0]: f'=== 批次: {b_name} ===',
-                          **{
-                              col: ''
-                              for col in t_df.columns[1:]
-                          },
-                      }
-                  ])
-              )
-              writer_total_sheets.append(t_df)
-              writer_total_sheets.append(
-                  pd.DataFrame(
-                      [
-                          {
-                              col: ''
-                              for col in t_df.columns
-                          }
-                      ]
-                  )
-              )
-            pd.concat(writer_total_sheets, ignore_index=True).to_excel(
-                writer, sheet_name='原材料Total', index=False
-            )
-
-            # 写入 原材料Risk4&5
-            writer_risk_sheets = []
-            for b_name, b_df in data_dict.items():
-              r_df = generate_single_batch_risk45_table(b_df)
-              writer_risk_sheets.append(
-                  pd.DataFrame([
-                      {
-                          r_df.columns[0]: f'=== 批次: {b_name} ===',
-                          **{
-                              col: ''
-                              for col in r_df.columns[1:]
-                          },
-                      }
-                  ])
-              )
-              writer_risk_sheets.append(r_df)
-              writer_risk_sheets.append(
-                  pd.DataFrame(
-                      [
-                          {
-                              col: ''
-                              for col in r_df.columns
-                          }
-                      ]
-                  )
-              )
-            pd.concat(writer_risk_sheets, ignore_index=True).to_excel(
-                writer, sheet_name='原材料risk4&5', index=False
-            )
-
-            # 写入 Category风险分布
-            writer_cat_sheets = []
-            for b_name, b_df in data_dict.items():
-              c_df = generate_single_batch_category_risk_table(b_df)
-              writer_cat_sheets.append(
-                  pd.DataFrame([
-                      {
-                          c_df.columns[0]: f'=== 批次: {b_name} ===',
-                          **{
-                              col: ''
-                              for col in c_df.columns[1:]
-                          },
-                      }
-                  ])
-              )
-              writer_cat_sheets.append(c_df)
-              writer_cat_sheets.append(
-                  pd.DataFrame(
-                      [
-                          {
-                              col: ''
-                              for col in c_df.columns
-                          }
-                      ]
-                  )
-              )
-            pd.concat(writer_cat_sheets, ignore_index=True).to_excel(
-                writer, sheet_name='Category风险分布', index=False
-            )
-
-          excel_data = output.getvalue()
-
-          st.download_button(
-              label='下载分批次独立表格报表 (.xlsx)',
-              data=excel_data,
-              file_name='batch_split_risk_analysis_report.xlsx',
-              mime=(
-                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-              ),
-          )
-        else:
-          st.info(
-              '在所选的批次对比区间内，未发现符合变化判定规则的物料变动。'
-          )
+        st.info('在所选的批次对比区间内，未发现符合变化判定规则的物料变动。')
 else:
-  st.info('请在左侧边栏上传您的多个批次 Excel 数据文件以开始使用。')
+  st.info(
+      '请在左侧边栏上传您的多个批次 Excel 数据文件，或在 GitHub 仓库的 `data/'
+      '目录中放入历史文件。'
+  )
