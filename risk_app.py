@@ -141,7 +141,6 @@ def generate_single_batch_total_table(df_batch):
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
 
-  # 有效风险范围
   valid_risks = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 9.0]
   df_filtered = df_c[df_c['NormRisk'].isin(valid_risks)]
 
@@ -160,7 +159,6 @@ def generate_single_batch_total_table(df_batch):
       fill_value=0,
   )
 
-  # 计算 All RM 和 Single Source
   all_rm_count = pivot_count.sum(axis=1)
   all_rm_value = pivot_value.sum(axis=1)
 
@@ -172,7 +170,6 @@ def generate_single_batch_total_table(df_batch):
       [r for r in single_source_risks if r in pivot_value.columns]
   ].sum(axis=1)
 
-  # 组装列（在 Risk0 前面加 All RM, Single Source）
   new_count_cols = pd.DataFrame(
       {'All_RM_Count': all_rm_count, 'Single_Source_Count': ss_count},
       index=pivot_count.index,
@@ -430,4 +427,134 @@ if uploaded_files:
             st.markdown('### 🚨 原材料 Risk 4&5 报表')
             for b_name, b_df in data_dict.items():
               st.markdown(f'#### 📌 批次: {b_name}')
-              r_df = generate_single_batch_risk4
+              r_df = generate_single_batch_risk45_table(b_df)
+              st.dataframe(r_df, use_container_width=True)
+
+          with tab5:
+            st.markdown(
+                '### 🏷️ Category 风险分布矩阵 (含 All RM 与 Single Source)'
+            )
+            for b_name, b_df in data_dict.items():
+              st.markdown(f'#### 📌 批次: {b_name}')
+              c_df = generate_single_batch_category_risk_table(b_df)
+              st.dataframe(c_df, use_container_width=True)
+
+          # 多 Sheet & 多表格 Excel 导出
+          st.markdown('---')
+          st.subheader('📥 导出完整多维分析报表 (.xlsx)')
+
+          output = io.BytesIO()
+          with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            cumulative_diff_df.to_excel(
+                writer, sheet_name='累计变动明细', index=False
+            )
+            summary_df.to_excel(
+                writer, sheet_name='NPX矩阵汇总', index=False
+            )
+
+            # 写入 原材料Total
+            writer_total_sheets = []
+            for b_name, b_df in data_dict.items():
+              t_df = generate_single_batch_total_table(b_df)
+              writer_total_sheets.append(
+                  pd.DataFrame([
+                      {
+                          t_df.columns[0]: f'=== 批次: {b_name} ===',
+                          **{
+                              col: ''
+                              for col in t_df.columns[1:]
+                          },
+                      }
+                  ])
+              )
+              writer_total_sheets.append(t_df)
+              writer_total_sheets.append(
+                  pd.DataFrame(
+                      [
+                          {
+                              col: ''
+                              for col in t_df.columns
+                          }
+                      ]
+                  )
+              )
+            pd.concat(writer_total_sheets, ignore_index=True).to_excel(
+                writer, sheet_name='原材料Total', index=False
+            )
+
+            # 写入 原材料Risk4&5
+            writer_risk_sheets = []
+            for b_name, b_df in data_dict.items():
+              r_df = generate_single_batch_risk45_table(b_df)
+              writer_risk_sheets.append(
+                  pd.DataFrame([
+                      {
+                          r_df.columns[0]: f'=== 批次: {b_name} ===',
+                          **{
+                              col: ''
+                              for col in r_df.columns[1:]
+                          },
+                      }
+                  ])
+              )
+              writer_risk_sheets.append(r_df)
+              writer_risk_sheets.append(
+                  pd.DataFrame(
+                      [
+                          {
+                              col: ''
+                              for col in r_df.columns
+                          }
+                      ]
+                  )
+              )
+            pd.concat(writer_risk_sheets, ignore_index=True).to_excel(
+                writer, sheet_name='原材料risk4&5', index=False
+            )
+
+            # 写入 Category风险分布
+            writer_cat_sheets = []
+            for b_name, b_df in data_dict.items():
+              c_df = generate_single_batch_category_risk_table(b_df)
+              writer_cat_sheets.append(
+                  pd.DataFrame([
+                      {
+                          c_df.columns[0]: f'=== 批次: {b_name} ===',
+                          **{
+                              col: ''
+                              for col in c_df.columns[1:]
+                          },
+                      }
+                  ])
+              )
+              writer_cat_sheets.append(c_df)
+              writer_cat_sheets.append(
+                  pd.DataFrame(
+                      [
+                          {
+                              col: ''
+                              for col in c_df.columns
+                          }
+                      ]
+                  )
+              )
+            pd.concat(writer_cat_sheets, ignore_index=True).to_excel(
+                writer, sheet_name='Category风险分布', index=False
+            )
+
+          excel_data = output.getvalue()
+
+          st.download_button(
+              label='下载分批次独立表格报表 (.xlsx)',
+              data=excel_data,
+              file_name='batch_split_risk_analysis_report.xlsx',
+              mime=(
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+              ),
+          )
+        else:
+          st.info(
+              '在所选的批次对比区间内，未发现符合变化判定规则的物料变动。'
+          )
+else:
+  st.info('请在左侧边栏上传您的多个批次 Excel 数据文件以开始使用。')
