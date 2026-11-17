@@ -5,7 +5,7 @@ import streamlit as st
 
 # 页面基本配置
 st.set_page_config(
-    page_title='物料风险动态比对与累计分析系统', page_icon='📊', layout='wide'
+    page_title='物料风险动态比对与多维报表系统', page_icon='📊', layout='wide'
 )
 
 
@@ -40,7 +40,6 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
   p['NormRisk'] = p['Risk'].apply(normalize_risk)
   c['NormRisk'] = c['Risk'].apply(normalize_risk)
 
-  # 外连接对齐主键
   merged = pd.merge(p, c, on=key_cols, how='outer', suffixes=('_prev', '_curr'))
 
   results = []
@@ -58,17 +57,10 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
 
     orig_risk_prev = row.get('Risk_prev')
     orig_risk_curr = row.get('Risk_curr')
-
-    # 优先取当前批次的辅助字段，没有则取上一批次
     category = (
         row.get('Category_curr')
         if pd.notna(row.get('Category_curr'))
         else row.get('Category_prev')
-    )
-    maker = (
-        row.get('Maker_curr')
-        if pd.notna(row.get('Maker_curr'))
-        else row.get('Maker_prev')
     )
 
     change_type = None
@@ -93,7 +85,7 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
     elif pd.isna(r_p) and pd.notna(r_c) and r_c in [4, 5]:
       change_type = '新增'
     else:
-      continue  # 无变化，直接舍弃
+      continue
 
     results.append({
         'Comparison_Task': f'{batch_name_prev} -> {batch_name_curr}',
@@ -102,7 +94,6 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
         'NPX Code': npx,
         'Material Code': mat,
         'Category': category,
-        'Maker': maker if pd.notna(maker) else 'Unassigned',
         'Prev_Risk_Original': orig_risk_prev,
         'Curr_Risk_Original': orig_risk_curr,
         'Change_Type': change_type,
@@ -146,69 +137,114 @@ def aggregate_by_npx(diff_df):
   return summary_df
 
 
-def generate_raw_material_totals(data_dict, baseline_batch):
-  """生成 Sheet 1: 原材料 Total (Risk 0, 1-5, 9 的数量与金额汇总)"""
+def generate_npx_batch_matrix(data_dict, risk_filter_func, metric_label):
+  """生成以 NPX Code 为纵列，各个批次名称为横列的透视表（含 TOTAL 行）"""
   rows = []
   for batch_name, df in data_dict.items():
-    df_copy = df.copy()
-    df_copy['NormRisk'] = df_copy['Risk'].apply(normalize_risk)
+    df_c = df.copy()
+    df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
+    filtered = df_c[risk_filter_func(df_c['NormRisk'])]
 
-    # 确定分组依据（若有 Maker/Country 则用，否则用 Category 或总体）
-    group_col = (
-        'Maker'
-        if 'Maker' in df_copy.columns and df_copy['Maker'].notna().sum() > 0
-        else 'Category'
+    grouped = (
+        filtered.groupby('NPX Code')
+        .agg(
+            Count=('Material Code', 'count'),
+            Value=('Annual Value USD', 'sum'),
+        )
+        .reset_index()
     )
 
-    for group_val, grp in df_copy.groupby(group_col):
-      # 统计 Risk 0, 1-5, 9 的合集
-      sub_grp = grp[grp['NormRisk'].isin([0, 1, 2, 3, 4, 5, 8, 9])]
-      cnt = len(sub_grp)
-      val = sub_grp['Annual Value USD'].sum()
+    grouped['Batch'] = batch_name
+    rows.append(grouped)
 
-      rows.append({
-          'Group_Dimension': group_val,
-          'Baseline_or_Batch': batch_name,
-          'Total_Material_Count': cnt,
-          'Total_Value_USD': val,
-      })
+  if not rows:
+    return pd.DataFrame()
 
-  return pd.DataFrame(rows)
+  combined = pd.concat(rows, ignore_index=True)
+
+  pivot_count = (
+      combined.pivot(index='NPX Code', columns='Batch', values='Count')
+      .fillna(0)
+      .add_suffix(f'_Count_{metric_label}')
+  )
+  pivot_value = (
+      combined.pivot(index='NPX Code', columns='Batch', values='Value')
+      .fillna(0)
+      .add_suffix(f'_Value_{metric_label}')
+  )
+
+  final_pivot = pd.concat([pivot_count, pivot_value], axis=1).reset_index()
+
+  numeric_cols = final_pivot.select_dtypes(include=[np.number]).columns
+  total_values = final_pivot[numeric_cols].sum(axis=0)
+  total_row = pd.DataFrame([total_values])
+  total_row['NPX Code'] = 'TOTAL'
+
+  final_pivot = pd.concat([final_pivot, total_row], ignore_index=True)
+  return final_pivot
 
 
-def generate_raw_material_risk45(data_dict, baseline_batch):
-  """生成 Sheet 2: 原材料 risk4&5 (只包含 Risk 4 和 5)"""
+def generate_category_risk_matrix(data_dict):
+  """生成以 Category 为纵坐标，横坐标展开各个批次下 Risk 0, 1, 2, 3, 4, 5, 9 的数量与金额数据"""
   rows = []
   for batch_name, df in data_dict.items():
-    df_copy = df.copy()
-    df_copy['NormRisk'] = df_copy['Risk'].apply(normalize_risk)
+    df_c = df.copy()
+    df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
+    valid_risks = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 9.0]
+    df_filtered = df_c[df_c['NormRisk'].isin(valid_risks)]
 
-    group_col = (
-        'Maker'
-        if 'Maker' in df_copy.columns and df_copy['Maker'].notna().sum() > 0
-        else 'Category'
+    grouped = (
+        df_filtered.groupby(['Category', 'NormRisk'])
+        .agg(
+            Count=('Material Code', 'count'),
+            Value=('Annual Value USD', 'sum'),
+        )
+        .reset_index()
     )
 
-    for group_val, grp in df_copy.groupby(group_col):
-      # 只包含 Risk 4 和 5
-      sub_grp = grp[grp['NormRisk'].isin([4, 5])]
-      cnt = len(sub_grp)
-      val = sub_grp['Annual Value USD'].sum()
+    grouped['Batch'] = batch_name
+    rows.append(grouped)
 
-      rows.append({
-          'Group_Dimension': group_val,
-          'Baseline_or_Batch': batch_name,
-          'Risk4_5_Material_Count': cnt,
-          'Risk4_5_Value_USD': val,
-      })
+  if not rows:
+    return pd.DataFrame()
 
-  return pd.DataFrame(rows)
+  combined = pd.concat(rows, ignore_index=True)
+
+  pivot_count = combined.pivot_table(
+      index='Category',
+      columns=['Batch', 'NormRisk'],
+      values='Count',
+      fill_value=0,
+  )
+  pivot_value = combined.pivot_table(
+      index='Category',
+      columns=['Batch', 'NormRisk'],
+      values='Value',
+      fill_value=0,
+  )
+
+  pivot_count.columns = [
+      f'{b}_Risk{int(r)}_Count' for b, r in pivot_count.columns
+  ]
+  pivot_value.columns = [
+      f'{b}_Risk{int(r)}_Value_USD' for b, r in pivot_value.columns
+  ]
+
+  final_pivot = pd.concat([pivot_count, pivot_value], axis=1).reset_index()
+
+  numeric_cols = final_pivot.select_dtypes(include=[np.number]).columns
+  total_values = final_pivot[numeric_cols].sum(axis=0)
+  total_row = pd.DataFrame([total_values])
+  total_row['Category'] = 'TOTAL'
+
+  final_pivot = pd.concat([final_pivot, total_row], ignore_index=True)
+  return final_pivot
 
 
 # --- 界面主逻辑 ---
 st.title('📊 物料风险动态比对与多维报表系统')
 st.markdown(
-    '上传多个批次数据，自动执行链式对比，并生成包含【明细数据】、【NPX矩阵汇总】、【原材料Total】以及【原材料Risk4&5】的多 Sheet 报表。'
+    '上传多个批次数据，自动执行链式对比，并生成包含【明细数据】、【NPX矩阵汇总】、【原材料Total】、【原材料Risk4&5】以及【Category风险分布矩阵】的多 Sheet 报表。'
 )
 
 with st.sidebar:
@@ -282,24 +318,27 @@ if uploaded_files:
           cumulative_diff_df = pd.concat(all_diffs, ignore_index=True)
           summary_df = aggregate_by_npx(cumulative_diff_df)
 
-          # 生成新增的两个 Sheet 数据
-          total_sheet_df = generate_raw_material_totals(
-              data_dict, baseline_batch
+          total_sheet_df = generate_npx_batch_matrix(
+              data_dict,
+              lambda r: r.isin([0, 1, 2, 3, 4, 5, 8, 9]),
+              'Total',
           )
-          risk45_sheet_df = generate_raw_material_risk45(
-              data_dict, baseline_batch
+          risk45_sheet_df = generate_npx_batch_matrix(
+              data_dict, lambda r: r.isin([4, 5]), 'Risk45'
           )
+          category_risk_df = generate_category_risk_matrix(data_dict)
 
           st.success(
               f'分析完成！累计产生变动明细记录共 {len(cumulative_diff_df)} 条。'
           )
 
           # 网页端展示选项卡
-          tab1, tab2, tab3, tab4 = st.tabs([
+          tab1, tab2, tab3, tab4, tab5 = st.tabs([
               '📋 变动明细数据',
-              '📊 NPX 矩阵汇总',
+              '📊 NPX 变化矩阵',
               '📦 原材料 Total',
               '🚨 原材料 Risk 4&5',
+              '🏷️ Category 风险分布矩阵',
           ])
 
           with tab1:
@@ -307,13 +346,14 @@ if uploaded_files:
           with tab2:
             st.dataframe(summary_df, use_container_width=True)
           with tab3:
-            st.markdown(
-                '### 各国家/品类基准月及各月原材料总量与金额 (Risk 0, 1-5, 9)'
-            )
             st.dataframe(total_sheet_df, use_container_width=True)
           with tab4:
-            st.markdown('### 各国家/品类基准月及各月高风险总量与金额 (Risk 4 & 5)')
             st.dataframe(risk45_sheet_df, use_container_width=True)
+          with tab5:
+            st.markdown(
+                '### Category 维度：各批次下 Risk 0, 1, 2, 3, 4, 5, 9 分布矩阵'
+            )
+            st.dataframe(category_risk_df, use_container_width=True)
 
           # 多 Sheet Excel 导出
           st.markdown('---')
@@ -332,6 +372,9 @@ if uploaded_files:
             )
             risk45_sheet_df.to_excel(
                 writer, sheet_name='原材料risk4&5', index=False
+            )
+            category_risk_df.to_excel(
+                writer, sheet_name='Category风险分布', index=False
             )
           excel_data = output.getvalue()
 
