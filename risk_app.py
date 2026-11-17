@@ -137,83 +137,75 @@ def aggregate_by_npx(diff_df):
 
 
 def generate_single_batch_total_table(df_batch):
-  """为单批次生成原材料 Total 表格（纵列 NPX Code，含 All RMS 与 Single Source Total）"""
+  """为单批次生成原材料 Total 表格（纵列 NPX Code，列顺序：All RM -> Single Source -> Risk 0 -> Risk 1-5, 9 ...）"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
 
-  # 按 NPX Code 统计各 Risk 数量和金额
-  r0 = (
-      df_c[df_c['NormRisk'] == 0]
-      .groupby('NPX Code')
-      .agg(C=('Material Code', 'count'), V=('Annual Value USD', 'sum'))
+  # 有效风险范围
+  valid_risks = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 9.0]
+  df_filtered = df_c[df_c['NormRisk'].isin(valid_risks)]
+
+  pivot_count = df_filtered.pivot_table(
+      index='NPX Code',
+      columns='NormRisk',
+      values='Material Code',
+      aggfunc='count',
+      fill_value=0,
   )
-  r15 = (
-      df_c[df_c['NormRisk'].isin([1, 2, 3, 4, 5])]
-      .groupby('NPX Code')
-      .agg(C=('Material Code', 'count'), V=('Annual Value USD', 'sum'))
-  )
-  r9 = (
-      df_c[df_c['NormRisk'] == 9]
-      .groupby('NPX Code')
-      .agg(C=('Material Code', 'count'), V=('Annual Value USD', 'sum'))
+  pivot_value = df_filtered.pivot_table(
+      index='NPX Code',
+      columns='NormRisk',
+      values='Annual Value USD',
+      aggfunc='sum',
+      fill_value=0,
   )
 
-  # 单独统计每个具体 Risk 0~5 用于 Single Source Total
-  risk_dict_c, risk_dict_v = {}, {}
-  for r in [0, 1, 2, 3, 4, 5]:
-    sub = (
-        df_c[df_c['NormRisk'] == r]
-        .groupby('NPX Code')
-        .agg(C=('Material Code', 'count'), V=('Annual Value USD', 'sum'))
-    )
-    risk_dict_c[r] = sub['C']
-    risk_dict_v[r] = sub['V']
+  # 计算 All RM 和 Single Source
+  all_rm_count = pivot_count.sum(axis=1)
+  all_rm_value = pivot_value.sum(axis=1)
 
-  npx_codes = sorted(df_c['NPX Code'].dropna().unique())
-  res_rows = []
+  single_source_risks = [1.0, 2.0, 3.0, 4.0, 5.0]
+  ss_count = pivot_count[
+      [r for r in single_source_risks if r in pivot_count.columns]
+  ].sum(axis=1)
+  ss_value = pivot_value[
+      [r for r in single_source_risks if r in pivot_value.columns]
+  ].sum(axis=1)
 
-  for npx in npx_codes:
-    row = {'NPX Code': npx}
-    # 各风险数量与金额
-    c0 = r0.loc[npx, 'C'] if npx in r0.index else 0
-    v0 = r0.loc[npx, 'V'] if npx in r0.index else 0.0
-    c15 = r15.loc[npx, 'C'] if npx in r15.index else 0
-    v15 = r15.loc[npx, 'V'] if npx in r15.index else 0.0
-    c9 = r9.loc[npx, 'C'] if npx in r9.index else 0
-    v9 = r9.loc[npx, 'V'] if npx in r9.index else 0.0
+  # 组装列（在 Risk0 前面加 All RM, Single Source）
+  new_count_cols = pd.DataFrame(
+      {'All_RM_Count': all_rm_count, 'Single_Source_Count': ss_count},
+      index=pivot_count.index,
+  )
+  for r in [0, 1, 2, 3, 4, 5, 9]:
+    if r in pivot_count.columns:
+      new_count_cols[f'Risk{int(r)}_Count'] = pivot_count[r]
+    else:
+      new_count_cols[f'Risk{int(r)}_Count'] = 0
 
-    row['Risk0_Count'] = c0
-    row['Risk0_Value_USD'] = v0
-    row['SingleSource_Count'] = c15
-    row['SingleSource_Value_USD'] = v15
-    row['Risk9_Count'] = c9
-    row['Risk9_Value_USD'] = v9
+  new_value_cols = pd.DataFrame(
+      {
+          'All_RM_Value_USD': all_rm_value,
+          'Single_Source_Value_USD': ss_value,
+      },
+      index=pivot_value.index,
+  )
+  for r in [0, 1, 2, 3, 4, 5, 9]:
+    if r in pivot_value.columns:
+      new_value_cols[f'Risk{int(r)}_Value_USD'] = pivot_value[r]
+    else:
+      new_value_cols[f'Risk{int(r)}_Value_USD'] = 0.0
 
-    # All RMS = Risk 0 + single source (1-5) + risk 9
-    row['All_RMS_Count'] = c0 + c15 + c9
-    row['All_RMS_Value_USD'] = v0 + v15 + v9
+  final_df = pd.concat([new_count_cols, new_value_cols], axis=1).reset_index()
 
-    # Single Source Total = risk 0 + risk 1 + risk 2 + risk 3 + risk 4 + risk 5
-    sum_c_ss, sum_v_ss = 0, 0.0
-    for r in [0, 1, 2, 3, 4, 5]:
-      val_c = risk_dict_c[r].get(npx, 0)
-      val_v = risk_dict_v[r].get(npx, 0.0)
-      sum_c_ss += val_c
-      sum_v_ss += val_v
-    row['Single_Source_Total_Count'] = sum_c_ss
-    row['Single_Source_Total_Value_USD'] = sum_v_ss
-
-    res_rows.append(row)
-
-  res_df = pd.DataFrame(res_rows)
-  if not res_df.empty:
-    numeric_cols = res_df.select_dtypes(include=[np.number]).columns
-    total_vals = res_df[numeric_cols].sum(axis=0)
+  if not final_df.empty:
+    numeric_cols = final_df.select_dtypes(include=[np.number]).columns
+    total_vals = final_df[numeric_cols].sum(axis=0)
     total_row = pd.DataFrame([total_vals])
     total_row['NPX Code'] = 'TOTAL'
-    res_df = pd.concat([res_df, total_row], ignore_index=True)
+    final_df = pd.concat([final_df, total_row], ignore_index=True)
 
-  return res_df
+  return final_df
 
 
 def generate_single_batch_risk45_table(df_batch):
@@ -263,7 +255,7 @@ def generate_single_batch_risk45_table(df_batch):
 
 
 def generate_single_batch_category_risk_table(df_batch):
-  """为单批次生成 Category 风险分布表（纵坐标 Category，横坐标 Risk 0,1,2,3,4,5,9）"""
+  """为单批次生成 Category 风险分布表（纵坐标 Category，横坐标含 All RM、Single Source 及 Risk 0~9）"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
   valid_risks = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 9.0]
@@ -284,10 +276,41 @@ def generate_single_batch_category_risk_table(df_batch):
       fill_value=0,
   )
 
-  pivot_count.columns = [f'Risk{int(r)}_Count' for r in pivot_count.columns]
-  pivot_value.columns = [f'Risk{int(r)}_Value_USD' for r in pivot_value.columns]
+  all_rm_count = pivot_count.sum(axis=1)
+  all_rm_value = pivot_value.sum(axis=1)
 
-  final_df = pd.concat([pivot_count, pivot_value], axis=1).reset_index()
+  single_source_risks = [1.0, 2.0, 3.0, 4.0, 5.0]
+  ss_count = pivot_count[
+      [r for r in single_source_risks if r in pivot_count.columns]
+  ].sum(axis=1)
+  ss_value = pivot_value[
+      [r for r in single_source_risks if r in pivot_value.columns]
+  ].sum(axis=1)
+
+  new_count_cols = pd.DataFrame(
+      {'All_RM_Count': all_rm_count, 'Single_Source_Count': ss_count},
+      index=pivot_count.index,
+  )
+  for r in [0, 1, 2, 3, 4, 5, 9]:
+    if r in pivot_count.columns:
+      new_count_cols[f'Risk{int(r)}_Count'] = pivot_count[r]
+    else:
+      new_count_cols[f'Risk{int(r)}_Count'] = 0
+
+  new_value_cols = pd.DataFrame(
+      {
+          'All_RM_Value_USD': all_rm_value,
+          'Single_Source_Value_USD': ss_value,
+      },
+      index=pivot_value.index,
+  )
+  for r in [0, 1, 2, 3, 4, 5, 9]:
+    if r in pivot_value.columns:
+      new_value_cols[f'Risk{int(r)}_Value_USD'] = pivot_value[r]
+    else:
+      new_value_cols[f'Risk{int(r)}_Value_USD'] = 0.0
+
+  final_df = pd.concat([new_count_cols, new_value_cols], axis=1).reset_index()
 
   if not final_df.empty:
     numeric_cols = final_df.select_dtypes(include=[np.number]).columns
@@ -302,7 +325,7 @@ def generate_single_batch_category_risk_table(df_batch):
 # --- 界面主逻辑 ---
 st.title('📊 物料风险动态比对与多维报表系统')
 st.markdown(
-    '上传多个批次数据，自动执行链式对比，并将最后 3 个核心报表按批次拆分为独立表格展示，同时内置 All RMS 与 Single Source Total 计算。'
+    '上传多个批次数据，自动执行链式对比，并将报表按批次独立展示，所有相关 Sheet 表格均已在 Risk 0 前加入 All RM、在 Risk 1 前加入 Single Source。'
 )
 
 with st.sidebar:
@@ -396,8 +419,7 @@ if uploaded_files:
 
           with tab3:
             st.markdown(
-                '### 📦 原材料 Total 报表 (各批次独立展示，含 All RMS & Single'
-                ' Source Total)'
+                '### 📦 原材料 Total 报表 (含 All RM 与 Single Source)'
             )
             for b_name, b_df in data_dict.items():
               st.markdown(f'#### 📌 批次: {b_name}')
@@ -405,135 +427,7 @@ if uploaded_files:
               st.dataframe(t_df, use_container_width=True)
 
           with tab4:
-            st.markdown(
-                '### 🚨 原材料 Risk 4&5 报表 (各批次高风险独立展示)'
-            )
+            st.markdown('### 🚨 原材料 Risk 4&5 报表')
             for b_name, b_df in data_dict.items():
               st.markdown(f'#### 📌 批次: {b_name}')
-              r_df = generate_single_batch_risk45_table(b_df)
-              st.dataframe(r_df, use_container_width=True)
-
-          with tab5:
-            st.markdown('### 🏷️ Category 风险分布矩阵 (各批次独立展示)')
-            for b_name, b_df in data_dict.items():
-              st.markdown(f'#### 📌 批次: {b_name}')
-              c_df = generate_single_batch_category_risk_table(b_df)
-              st.dataframe(c_df, use_container_width=True)
-
-          # 多 Sheet & 多表格 Excel 导出
-          st.markdown('---')
-          st.subheader('📥 导出完整多维分析报表 (.xlsx)')
-
-          output = io.BytesIO()
-          with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            cumulative_diff_df.to_excel(
-                writer, sheet_name='累计变动明细', index=False
-            )
-            summary_df.to_excel(
-                writer, sheet_name='NPX矩阵汇总', index=False
-            )
-
-            # 针对最后3个 Sheet，把各个批次分区块写入同一个 Sheet 中
-            writer_total_sheets = []
-            for b_name, b_df in data_dict.items():
-              t_df = generate_single_batch_total_table(b_df)
-              writer_total_sheets.append(
-                  pd.DataFrame([
-                      {
-                          t_df.columns[0]: f'=== 批次: {b_name} ===',
-                          **{
-                              col: ''
-                              for col in t_df.columns[1:]
-                          },
-                      }
-                  ])
-              )
-              writer_total_sheets.append(t_df)
-              writer_total_sheets.append(
-                  pd.DataFrame(
-                      [
-                          {
-                              col: ''
-                              for col in t_df.columns
-                          }
-                      ]
-                  )
-              )  # 空行
-            pd.concat(writer_total_sheets, ignore_index=True).to_excel(
-                writer, sheet_name='原材料Total', index=False
-            )
-
-            writer_risk_sheets = []
-            for b_name, b_df in data_dict.items():
-              r_df = generate_single_batch_risk45_table(b_df)
-              writer_risk_sheets.append(
-                  pd.DataFrame([
-                      {
-                          r_df.columns[0]: f'=== 批次: {b_name} ===',
-                          **{
-                              col: ''
-                              for col in r_df.columns[1:]
-                          },
-                      }
-                  ])
-              )
-              writer_risk_sheets.append(r_df)
-              writer_risk_sheets.append(
-                  pd.DataFrame(
-                      [
-                          {
-                              col: ''
-                              for col in r_df.columns
-                          }
-                      ]
-                  )
-              )
-            pd.concat(writer_risk_sheets, ignore_index=True).to_excel(
-                writer, sheet_name='原材料risk4&5', index=False
-            )
-
-            writer_cat_sheets = []
-            for b_name, b_df in data_dict.items():
-              c_df = generate_single_batch_category_risk_table(b_df)
-              writer_cat_sheets.append(
-                  pd.DataFrame([
-                      {
-                          c_df.columns[0]: f'=== 批次: {b_name} ===',
-                          **{
-                              col: ''
-                              for col in c_df.columns[1:]
-                          },
-                      }
-                  ])
-              )
-              writer_cat_sheets.append(c_df)
-              writer_cat_sheets.append(
-                  pd.DataFrame(
-                      [
-                          {
-                              col: ''
-                              for col in c_df.columns
-                          }
-                      ]
-                  )
-              )
-            pd.concat(writer_cat_sheets, ignore_index=True).to_excel(
-                writer, sheet_name='Category风险分布', index=False
-            )
-
-          excel_data = output.getvalue()
-
-          st.download_button(
-              label='下载分批次独立表格报表 (.xlsx)',
-              data=excel_data,
-              file_name='batch_split_risk_analysis_report.xlsx',
-              mime=(
-                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-              ),
-          )
-        else:
-          st.info(
-              '在所选的批次对比区间内，未发现符合变化判定规则的物料变动。'
-          )
-else:
-  st.info('请在左侧边栏上传您的多个批次 Excel 数据文件以开始使用。')
+              r_df = generate_single_batch_risk4
