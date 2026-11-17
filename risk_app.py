@@ -3,7 +3,6 @@ import pandas as pd
 from supabase import create_client, Client
 import io
 
-# 初始化Supabase客户端
 @st.cache_resource
 def init_supabase():
     url = st.secrets["SUPABASE_URL"]
@@ -12,7 +11,6 @@ def init_supabase():
 
 supabase: Client = init_supabase()
 
-# 实时查询所有批次列表
 @st.cache_data(ttl=1)
 def get_all_batches():
     response = supabase.table("raw_material_data").select("批次名称").execute()
@@ -20,20 +18,20 @@ def get_all_batches():
     return sorted(batches, reverse=True)
 
 st.title("🔍 原料风险对比工具")
-
 st.header("📤 上传新批次Excel")
-uploaded_file = st.file_uploader("上传Excel文件（表头：批次名称,NPX Code,Material Code,原料名称,Risk）", type=["xlsx"])
+uploaded_file = st.file_uploader("上传Excel文件（自动识别：批次名称,NPX Code,Material Code,原料名称,Risk列）", type=["xlsx"])
 
 if uploaded_file is not None:
     try:
         df = pd.read_excel(uploaded_file)
-        # ✅ 修复空值报错：把所有空白单元格替换为空字符串，Supabase不再报错
+        # ✅ 核心修复：自动只提取需要的5列，忽略Excel里所有多余的列
+        required_cols = ["批次名称", "NPX Code", "Material Code", "原料名称", "Risk"]
+        df = df[required_cols]
+        
         df = df.fillna("")
-        # 处理Risk值：转整数，空值保留空字符串
         df["Risk"] = df["Risk"].apply(lambda x: int(round(x)) if x != "" and not pd.isna(x) else x)
         
         current_batch = df["批次名称"].iloc[0]
-        # 先删除该批次所有旧数据，实现最后一次上传为准
         supabase.table("raw_material_data").delete().eq("批次名称", current_batch).execute()
         
         data_to_insert = df.to_dict(orient="records")
