@@ -54,6 +54,8 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
     val_curr = row.get('Annual Value USD_curr', np.nan)
     val_prev = row.get('Annual Value USD_prev', np.nan)
     val = val_curr if pd.notna(val_curr) else val_prev
+    # 金额除以 1,000,000 并四舍五入取整
+    val = round(val / 1_000_000) if pd.notna(val) else 0
 
     orig_risk_prev = row.get('Risk_prev')
     orig_risk_curr = row.get('Risk_curr')
@@ -96,7 +98,7 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
         'Prev_Risk_Original': orig_risk_prev,
         'Curr_Risk_Original': orig_risk_curr,
         'Change_Type': change_type,
-        'Value': val,
+        'Value_MUSD': val,
     })
 
   return pd.DataFrame(results)
@@ -117,13 +119,13 @@ def aggregate_by_npx(diff_df):
   value_pivot = diff_df.pivot_table(
       index='NPX Code',
       columns='Change_Type',
-      values='Value',
+      values='Value_MUSD',
       aggfunc='sum',
       fill_value=0,
   )
 
   count_pivot = count_pivot.add_suffix('_Count')
-  value_pivot = value_pivot.add_suffix('_Value_USD')
+  value_pivot = value_pivot.add_suffix('_Value_MUSD')
 
   summary_df = pd.concat([count_pivot, value_pivot], axis=1).reset_index()
 
@@ -137,9 +139,10 @@ def aggregate_by_npx(diff_df):
 
 
 def generate_single_batch_total_table(df_batch):
-  """为单批次生成原材料 Total 表格（纵列 NPX Code，列顺序：All RM -> Single Source -> Risk 0 -> Risk 1-5, 9 ...）"""
+  """为单批次生成原材料 Total 表格（金额除以100万并取整）"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
+  df_c['ValM'] = df_c['Annual Value USD'] / 1_000_000
 
   valid_risks = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 9.0]
   df_filtered = df_c[df_c['NormRisk'].isin(valid_risks)]
@@ -154,10 +157,10 @@ def generate_single_batch_total_table(df_batch):
   pivot_value = df_filtered.pivot_table(
       index='NPX Code',
       columns='NormRisk',
-      values='Annual Value USD',
+      values='ValM',
       aggfunc='sum',
       fill_value=0,
-  )
+  ).round()
 
   all_rm_count = pivot_count.sum(axis=1)
   all_rm_value = pivot_value.sum(axis=1)
@@ -182,16 +185,16 @@ def generate_single_batch_total_table(df_batch):
 
   new_value_cols = pd.DataFrame(
       {
-          'All_RM_Value_USD': all_rm_value,
-          'Single_Source_Value_USD': ss_value,
+          'All_RM_Value_MUSD': all_rm_value,
+          'Single_Source_Value_MUSD': ss_value,
       },
       index=pivot_value.index,
   )
   for r in [0, 1, 2, 3, 4, 5, 9]:
     if r in pivot_value.columns:
-      new_value_cols[f'Risk{int(r)}_Value_USD'] = pivot_value[r]
+      new_value_cols[f'Risk{int(r)}_Value_MUSD'] = pivot_value[r]
     else:
-      new_value_cols[f'Risk{int(r)}_Value_USD'] = 0.0
+      new_value_cols[f'Risk{int(r)}_Value_MUSD'] = 0
 
   final_df = pd.concat([new_count_cols, new_value_cols], axis=1).reset_index()
 
@@ -206,19 +209,20 @@ def generate_single_batch_total_table(df_batch):
 
 
 def generate_single_batch_risk45_table(df_batch):
-  """为单批次生成原材料 Risk 4&5 表格"""
+  """为单批次生成原材料 Risk 4&5 表格（金额除以100万并取整）"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
+  df_c['ValM'] = df_c['Annual Value USD'] / 1_000_000
 
   r4 = (
       df_c[df_c['NormRisk'] == 4]
       .groupby('NPX Code')
-      .agg(C=('Material Code', 'count'), V=('Annual Value USD', 'sum'))
+      .agg(C=('Material Code', 'count'), V=('ValM', 'sum'))
   )
   r5 = (
       df_c[df_c['NormRisk'] == 5]
       .groupby('NPX Code')
-      .agg(C=('Material Code', 'count'), V=('Annual Value USD', 'sum'))
+      .agg(C=('Material Code', 'count'), V=('ValM', 'sum'))
   )
 
   npx_codes = sorted(df_c['NPX Code'].dropna().unique())
@@ -226,18 +230,18 @@ def generate_single_batch_risk45_table(df_batch):
 
   for npx in npx_codes:
     c4 = r4.loc[npx, 'C'] if npx in r4.index else 0
-    v4 = r4.loc[npx, 'V'] if npx in r4.index else 0.0
+    v4 = round(r4.loc[npx, 'V']) if npx in r4.index else 0
     c5 = r5.loc[npx, 'C'] if npx in r5.index else 0
-    v5 = r5.loc[npx, 'V'] if npx in r5.index else 0.0
+    v5 = round(r5.loc[npx, 'V']) if npx in r5.index else 0
 
     res_rows.append({
         'NPX Code': npx,
         'Risk4_Count': c4,
-        'Risk4_Value_USD': v4,
+        'Risk4_Value_MUSD': v4,
         'Risk5_Count': c5,
-        'Risk5_Value_USD': v5,
+        'Risk5_Value_MUSD': v5,
         'Risk4_5_Total_Count': c4 + c5,
-        'Risk4_5_Total_Value_USD': v4 + v5,
+        'Risk4_5_Total_Value_MUSD': v4 + v5,
     })
 
   res_df = pd.DataFrame(res_rows)
@@ -252,9 +256,11 @@ def generate_single_batch_risk45_table(df_batch):
 
 
 def generate_single_batch_category_risk_table(df_batch):
-  """为单批次生成 Category 风险分布表（纵坐标 Category，横坐标含 All RM、Single Source 及 Risk 0~9）"""
+  """为单批次生成 Category 风险分布表（金额除以100万并取整）"""
   df_c = df_batch.copy()
   df_c['NormRisk'] = df_c['Risk'].apply(normalize_risk)
+  df_c['ValM'] = df_c['Annual Value USD'] / 1_000_000
+
   valid_risks = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 9.0]
   df_filtered = df_c[df_c['NormRisk'].isin(valid_risks)]
 
@@ -265,12 +271,15 @@ def generate_single_batch_category_risk_table(df_batch):
       aggfunc='count',
       fill_value=0,
   )
-  pivot_value = df_filtered.pivot_table(
-      index='Category',
-      columns='NormRisk',
-      values='Annual Value USD',
-      aggfunc='sum',
-      fill_value=0,
+  pivot_value = (
+      df_filtered.pivot_table(
+          index='Category',
+          columns='NormRisk',
+          values='ValM',
+          aggfunc='sum',
+          fill_value=0,
+      )
+      .round()
   )
 
   all_rm_count = pivot_count.sum(axis=1)
@@ -296,16 +305,16 @@ def generate_single_batch_category_risk_table(df_batch):
 
   new_value_cols = pd.DataFrame(
       {
-          'All_RM_Value_USD': all_rm_value,
-          'Single_Source_Value_USD': ss_value,
+          'All_RM_Value_MUSD': all_rm_value,
+          'Single_Source_Value_MUSD': ss_value,
       },
       index=pivot_value.index,
   )
   for r in [0, 1, 2, 3, 4, 5, 9]:
     if r in pivot_value.columns:
-      new_value_cols[f'Risk{int(r)}_Value_USD'] = pivot_value[r]
+      new_value_cols[f'Risk{int(r)}_Value_MUSD'] = pivot_value[r]
     else:
-      new_value_cols[f'Risk{int(r)}_Value_USD'] = 0.0
+      new_value_cols[f'Risk{int(r)}_Value_MUSD'] = 0
 
   final_df = pd.concat([new_count_cols, new_value_cols], axis=1).reset_index()
 
@@ -322,7 +331,7 @@ def generate_single_batch_category_risk_table(df_batch):
 # --- 界面主逻辑 ---
 st.title('📊 物料风险动态比对与多维报表系统')
 st.markdown(
-    '上传多个批次数据，自动执行链式对比，并将报表按批次独立展示，所有相关 Sheet 表格均已在 Risk 0 前加入 All RM、在 Risk 1 前加入 Single Source。'
+    '上传多个批次数据，自动执行链式对比。所有金额指标已统一转换为 **百万美元 (MUSD)** 且不保留小数点。'
 )
 
 with st.sidebar:
@@ -416,7 +425,7 @@ if uploaded_files:
 
           with tab3:
             st.markdown(
-                '### 📦 原材料 Total 报表 (含 All RM 与 Single Source)'
+                '### 📦 原材料 Total 报表 (金额单位: MUSD，无小数点)'
             )
             for b_name, b_df in data_dict.items():
               st.markdown(f'#### 📌 批次: {b_name}')
@@ -424,7 +433,9 @@ if uploaded_files:
               st.dataframe(t_df, use_container_width=True)
 
           with tab4:
-            st.markdown('### 🚨 原材料 Risk 4&5 报表')
+            st.markdown(
+                '### 🚨 原材料 Risk 4&5 报表 (金额单位: MUSD，无小数点)'
+            )
             for b_name, b_df in data_dict.items():
               st.markdown(f'#### 📌 批次: {b_name}')
               r_df = generate_single_batch_risk45_table(b_df)
@@ -432,7 +443,7 @@ if uploaded_files:
 
           with tab5:
             st.markdown(
-                '### 🏷️ Category 风险分布矩阵 (含 All RM 与 Single Source)'
+                '### 🏷️ Category 风险分布矩阵 (金额单位: MUSD，无小数点)'
             )
             for b_name, b_df in data_dict.items():
               st.markdown(f'#### 📌 批次: {b_name}')
