@@ -52,23 +52,28 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
     r_p = row['NormRisk_prev']
     r_c = row['NormRisk_curr']
 
-    # 金额取物料出现最后一批的金额为主
     val_curr = row.get('Annual Value USD_curr', np.nan)
     val_prev = row.get('Annual Value USD_prev', np.nan)
     val = val_curr if pd.notna(val_curr) else val_prev
 
     orig_risk_prev = row.get('Risk_prev')
     orig_risk_curr = row.get('Risk_curr')
+
+    # 优先取当前批次的辅助字段，没有则取上一批次
     category = (
         row.get('Category_curr')
         if pd.notna(row.get('Category_curr'))
         else row.get('Category_prev')
     )
+    maker = (
+        row.get('Maker_curr')
+        if pd.notna(row.get('Maker_curr'))
+        else row.get('Maker_prev')
+    )
 
     change_type = None
 
     # 变化判定规则（严格按顺序执行）：
-    # 1. 上批次Risk=4或5，本批次变为Risk0 或 Risk 1-3， 或者 Risk=8 或Risk=9 → 降低
     if (
         pd.notna(r_p)
         and r_p in [4, 5]
@@ -76,10 +81,8 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
         and (r_c in [0, 1, 2, 3] or r_c in [8, 9])
     ):
       change_type = '降低'
-    # 2. 上批次Risk=4或5，本批次该主键物料不存在 → 非活跃
     elif pd.notna(r_p) and r_p in [4, 5] and pd.isna(r_c):
       change_type = '非活跃'
-    # 3. 上批次Risk为0/1/2/3/8/9，本批次Risk=4或5 → 升高
     elif (
         pd.notna(r_p)
         and r_p in [0, 1, 2, 3, 8, 9]
@@ -87,7 +90,6 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
         and r_c in [4, 5]
     ):
       change_type = '升高'
-    # 4. 上批次不存在该主键物料，本批次出现，且本批次Risk=4或5 → 新增
     elif pd.isna(r_p) and pd.notna(r_c) and r_c in [4, 5]:
       change_type = '新增'
     else:
@@ -100,6 +102,7 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
         'NPX Code': npx,
         'Material Code': mat,
         'Category': category,
+        'Maker': maker if pd.notna(maker) else 'Unassigned',
         'Prev_Risk_Original': orig_risk_prev,
         'Curr_Risk_Original': orig_risk_curr,
         'Change_Type': change_type,
@@ -110,7 +113,7 @@ def compare_two_batches(df_prev, df_curr, batch_name_prev, batch_name_curr):
 
 
 def aggregate_by_npx(diff_df):
-  """以 NPX Code 为维度进行数量与金额对比汇总"""
+  """以 NPX Code 为维度进行矩阵汇总（含 Total 行）"""
   if diff_df.empty:
     return pd.DataFrame()
 
@@ -121,7 +124,6 @@ def aggregate_by_npx(diff_df):
       aggfunc='count',
       fill_value=0,
   )
-
   value_pivot = diff_df.pivot_table(
       index='NPX Code',
       columns='Change_Type',
@@ -134,13 +136,79 @@ def aggregate_by_npx(diff_df):
   value_pivot = value_pivot.add_suffix('_Value_USD')
 
   summary_df = pd.concat([count_pivot, value_pivot], axis=1).reset_index()
+
+  numeric_cols = summary_df.select_dtypes(include=[np.number]).columns
+  total_values = summary_df[numeric_cols].sum(axis=0)
+  total_row = pd.DataFrame([total_values])
+  total_row['NPX Code'] = 'TOTAL'
+
+  summary_df = pd.concat([summary_df, total_row], ignore_index=True)
   return summary_df
 
 
+def generate_raw_material_totals(data_dict, baseline_batch):
+  """生成 Sheet 1: 原材料 Total (Risk 0, 1-5, 9 的数量与金额汇总)"""
+  rows = []
+  for batch_name, df in data_dict.items():
+    df_copy = df.copy()
+    df_copy['NormRisk'] = df_copy['Risk'].apply(normalize_risk)
+
+    # 确定分组依据（若有 Maker/Country 则用，否则用 Category 或总体）
+    group_col = (
+        'Maker'
+        if 'Maker' in df_copy.columns and df_copy['Maker'].notna().sum() > 0
+        else 'Category'
+    )
+
+    for group_val, grp in df_copy.groupby(group_col):
+      # 统计 Risk 0, 1-5, 9 的合集
+      sub_grp = grp[grp['NormRisk'].isin([0, 1, 2, 3, 4, 5, 8, 9])]
+      cnt = len(sub_grp)
+      val = sub_grp['Annual Value USD'].sum()
+
+      rows.append({
+          'Group_Dimension': group_val,
+          'Baseline_or_Batch': batch_name,
+          'Total_Material_Count': cnt,
+          'Total_Value_USD': val,
+      })
+
+  return pd.DataFrame(rows)
+
+
+def generate_raw_material_risk45(data_dict, baseline_batch):
+  """生成 Sheet 2: 原材料 risk4&5 (只包含 Risk 4 和 5)"""
+  rows = []
+  for batch_name, df in data_dict.items():
+    df_copy = df.copy()
+    df_copy['NormRisk'] = df_copy['Risk'].apply(normalize_risk)
+
+    group_col = (
+        'Maker'
+        if 'Maker' in df_copy.columns and df_copy['Maker'].notna().sum() > 0
+        else 'Category'
+    )
+
+    for group_val, grp in df_copy.groupby(group_col):
+      # 只包含 Risk 4 和 5
+      sub_grp = grp[grp['NormRisk'].isin([4, 5])]
+      cnt = len(sub_grp)
+      val = sub_grp['Annual Value USD'].sum()
+
+      rows.append({
+          'Group_Dimension': group_val,
+          'Baseline_or_Batch': batch_name,
+          'Risk4_5_Material_Count': cnt,
+          'Risk4_5_Value_USD': val,
+      })
+
+  return pd.DataFrame(rows)
+
+
 # --- 界面主逻辑 ---
-st.title('📊 物料风险动态比对与累计分析系统')
+st.title('📊 物料风险动态比对与多维报表系统')
 st.markdown(
-    '上传多个批次的数据文件（Excel），自由选择基准批次与对比批次，系统将自动执行链式对比并生成累计分析报表。'
+    '上传多个批次数据，自动执行链式对比，并生成包含【明细数据】、【NPX矩阵汇总】、【原材料Total】以及【原材料Risk4&5】的多 Sheet 报表。'
 )
 
 with st.sidebar:
@@ -155,9 +223,7 @@ if uploaded_files:
     try:
       df = pd.read_excel(file)
       df.columns = [str(c).strip() for c in df.columns]
-      # 尝试提取批次名称（优先取“批次名称”列的值，若无则用文件名）
       if '批次名称' in df.columns and not df['批次名称'].dropna().empty:
-        # 取第一行或唯一值作为批次标识
         batch_key = str(df['批次名称'].dropna().iloc[0])
       else:
         batch_key = file.name.split('.')[0]
@@ -166,7 +232,6 @@ if uploaded_files:
       st.error(f'读取文件 {file.name} 失败: {e}')
 
   if data_dict:
-    # 按照批次名称排序
     sorted_batches = sorted(list(data_dict.keys()))
 
     st.sidebar.markdown('---')
@@ -188,12 +253,10 @@ if uploaded_files:
       if not comparison_batches:
         st.warning('请至少选择一个对比批次！')
       else:
-        # 链式对比逻辑
         all_diffs = []
         current_baseline_name = baseline_batch
         active_df = data_dict[baseline_batch]
 
-        # 按字母/时间先后顺序对选中的对比批次排序
         selected_comparisons = sorted(comparison_batches)
 
         progress_text = st.empty()
@@ -204,14 +267,12 @@ if uploaded_files:
           )
           next_df = data_dict[next_batch_name]
 
-          # 执行两两比对
           diff_res = compare_two_batches(
               active_df, next_df, current_baseline_name, next_batch_name
           )
           if not diff_res.empty:
             all_diffs.append(diff_res)
 
-          # 进入下一轮链式基准
           active_df = next_df
           current_baseline_name = next_batch_name
 
@@ -219,26 +280,44 @@ if uploaded_files:
 
         if all_diffs:
           cumulative_diff_df = pd.concat(all_diffs, ignore_index=True)
+          summary_df = aggregate_by_npx(cumulative_diff_df)
 
-          st.success(
-              f'对比完成！累计产生变动明细记录共 {len(cumulative_diff_df)} 条。'
+          # 生成新增的两个 Sheet 数据
+          total_sheet_df = generate_raw_material_totals(
+              data_dict, baseline_batch
+          )
+          risk45_sheet_df = generate_raw_material_risk45(
+              data_dict, baseline_batch
           )
 
-          # 选项卡展示结果
-          tab1, tab2 = st.tabs(['📋 变动明细数据', '📊 NPX 维度汇总统计'])
+          st.success(
+              f'分析完成！累计产生变动明细记录共 {len(cumulative_diff_df)} 条。'
+          )
+
+          # 网页端展示选项卡
+          tab1, tab2, tab3, tab4 = st.tabs([
+              '📋 变动明细数据',
+              '📊 NPX 矩阵汇总',
+              '📦 原材料 Total',
+              '🚨 原材料 Risk 4&5',
+          ])
 
           with tab1:
-            st.subheader('变动明细明细表 (过滤无变化后)')
             st.dataframe(cumulative_diff_df, use_container_width=True)
-
           with tab2:
-            st.subheader('NPX Code 维度变化统计与金额汇总')
-            summary_df = aggregate_by_npx(cumulative_diff_df)
             st.dataframe(summary_df, use_container_width=True)
+          with tab3:
+            st.markdown(
+                '### 各国家/品类基准月及各月原材料总量与金额 (Risk 0, 1-5, 9)'
+            )
+            st.dataframe(total_sheet_df, use_container_width=True)
+          with tab4:
+            st.markdown('### 各国家/品类基准月及各月高风险总量与金额 (Risk 4 & 5)')
+            st.dataframe(risk45_sheet_df, use_container_width=True)
 
-          # 下载导出功能
+          # 多 Sheet Excel 导出
           st.markdown('---')
-          st.subheader('📥 导出累计分析结果')
+          st.subheader('📥 导出包含多 Sheet 的完整分析报表')
 
           output = io.BytesIO()
           with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -246,14 +325,20 @@ if uploaded_files:
                 writer, sheet_name='累计变动明细', index=False
             )
             summary_df.to_excel(
-                writer, sheet_name='NPX维度汇总', index=False
+                writer, sheet_name='NPX矩阵汇总', index=False
+            )
+            total_sheet_df.to_excel(
+                writer, sheet_name='原材料Total', index=False
+            )
+            risk45_sheet_df.to_excel(
+                writer, sheet_name='原材料risk4&5', index=False
             )
           excel_data = output.getvalue()
 
           st.download_button(
-              label='下载完整累计报表 (.xlsx)',
+              label='下载完整累计多维报表 (.xlsx)',
               data=excel_data,
-              file_name='cumulative_risk_analysis_report.xlsx',
+              file_name='multi_sheet_risk_analysis_report.xlsx',
               mime=(
                   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
               ),
